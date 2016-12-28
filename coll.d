@@ -1,3 +1,7 @@
+/*  coll - A commandline program that detects duplicate files in directories
+ *  @author Thomas Ansill
+ *  @date 12/27/2016
+ */
 import std.stdio;
 import std.digest.sha;
 import std.file;
@@ -9,25 +13,38 @@ import std.container;
 import std.parallelism;
 import std.exception;
 
+/** FilePaths structure
+ *  contains a list of file paths that share the same digest
+ */
 struct FilePaths{
-    DList!string* list;
-    uint list_length;
-    string digest;
-    ulong size;
+    DList!string* list; // list of file paths
+    uint length; // length of file path list
+    string digest; // digest
+    ulong size; // size of that file
 }
 
+/** CollisionSet structure
+ *  Maintains the set of CollisionSet
+ */
 struct CollisionSet{
-    uint member = 0;
-    FilePaths*[string] set;
-    bool[string] collisions;
+    uint length = 0; // number of filepaths in the set
+    FilePaths*[string] set; // the set of filepaths
+    bool[string] collisions; // hashset of hash collisions
 }
 
+/** length of previous stdout write used in progress() function */
 shared long prevLen = 0;
+
+/** Quiet mode flag */
 shared bool quiet = false;
 
+/** Main method
+ *  Starts the search and reports the results to stdout
+ *  @param args Commandline arguments
+ */
 void main(string[] args){
     // Write a welcome message
-    writeln("coll v0.3 - finds duplicate files in directories");
+    writeln("coll v0.4 - finds duplicate files in directories");
 
     // Check input for any errors
     if(args.length < 2) usage(args[0]);
@@ -50,13 +67,17 @@ void main(string[] args){
         directories_size++;
     }
 
+    // Check if input directories are not empty
     if(directories_size == 0) usage(args[0]);
 
+    // Iterate the excluded directories list if -n is detected
     bool[string] exclude;
-    for(uint i = pos; i < args.length; i++){
-        if(!exists(args[i])) usage(args[0], format("ERROR: Directory '%s' does not exist", args[i]));
-        if(!isDir(args[i])) usage(args[0], format("ERROR: Specified path '%s' is not a directory", args[i]));
-        exclude[args[i]] = true;
+    if(pos != -1){
+        for(uint i = pos; i < args.length; i++){
+            if(!exists(args[i])) usage(args[0], format("ERROR: Directory '%s' does not exist", args[i]));
+            if(!isDir(args[i])) usage(args[0], format("ERROR: Specified path '%s' is not a directory", args[i]));
+            exclude[args[i]] = true;
+        }
     }
 
     // Start the collection
@@ -75,7 +96,7 @@ void main(string[] args){
 
             // Compute the wasted space
             ulong size = set.set[collision].size;
-            size *= set.set[collision].list_length - 1;
+            size *= set.set[collision].length - 1;
             total_space += size;
 
             // Print the collided hash
@@ -97,11 +118,15 @@ void main(string[] args){
             writeln();
         }
         // Print results and exit
-        writef("%d files searched. %d duplicates found. %s of storage space used for those duplicates.\n", set.member, set.collisions.length, normalizeBytes(total_space));
+        writef("%d files searched. %d duplicates found. %s of storage space used for those duplicates.\n", set.length, set.collisions.length, normalizeBytes(total_space));
         stdout.flush();
     }
 }
 
+/** Returns a string of space with a proper SI units
+ *  @param size space in Bytes
+ *  @return String that represents the space reduced to nearest tenths
+ */
 string normalizeBytes(ulong size){
     if(size < 1000) return format("%d B", size); // Bytes
     if(size >= 1000 && size < 1000000) return format("%.1f KB", size/1000.0f); // Kilobytes
@@ -111,6 +136,11 @@ string normalizeBytes(ulong size){
     return format("%.1f PB", size/1000000000000000.0f); // Petabytes
 }
 
+/** Searches the directories for collisions
+ *  @param directories List of directories to be searched
+ *  @param exclude Set of directories to be excluded from the search
+ *  @return CollisionSet object that contains all of the reported file duplicates if existed
+ */
 CollisionSet* searchCollisions(DList!string* directories, bool[string] exclude){
 
     // Create a collection object
@@ -151,20 +181,25 @@ CollisionSet* searchCollisions(DList!string* directories, bool[string] exclude){
     }
 
     // Wait until all tasks are finished
-    tp.finish(true);
+    tp.finish(true); // 'true' to block until all tasks finish
 
     // Clean up the verbose text
     if(!quiet) cleanProgress();
 
+    // Done! Return the results
     return set;
 }
 
+/** Thread function - processes a file and add it to the table
+ *  @param filepath filepath to be processed
+ *  @param set Table of files for the file's digest to be added
+ */
 void processFile(string filepath, CollisionSet* set){
 
     // Check the input
     if(filepath == null || set == null) return;
 
-    // Open the file
+    // Open the file - if file fails to open, just report error and move on
     File* file = null;
     try file = new File(filepath, "r");
     catch(ErrnoException e){
@@ -186,8 +221,18 @@ void processFile(string filepath, CollisionSet* set){
 
     // Add the result to the set
     addDigest(filepath, digest, set, file.size);
+
+    // Close the file
+    try file.close();
+    catch(Exception e) return; // Do nothing on error
 }
 
+/** Synchronized function to insert the hash digest into the table
+ *  @param filepath the path of file
+ *  @param digest Digest of file
+ *  @param set Table of files
+ *  @param size Size of the file in Bytes
+ */
 void addDigest(string filepath, string digest, CollisionSet* set, ulong size){
     // Check parameters
     if(filepath == null || digest == null || set == null){
@@ -197,24 +242,28 @@ void addDigest(string filepath, string digest, CollisionSet* set, ulong size){
 
     // Do a synchronized insert into the set
     synchronized{
-        if(digest in set.set){
+        if(digest in set.set){ // Collision found
             set.set[digest].list.insertBack(filepath);
-            set.set[digest].list_length++;
+            set.set[digest].length++;
             set.collisions[digest] = true;
-        }else{
+        }else{ // Collision not found
             DList!string* list = new DList!string();
             list.insertBack(filepath);
             FilePaths* fp = new FilePaths(list, 1, digest, size);
             set.set[digest] = fp;
         }
-        set.member++;
+        set.length++;
     }
 }
 
+/** Verbose function to display the progress of directory search
+ *  @param filepath Path of file currently being searched
+ *  @param set Table of files
+ */
 void progress(string filepath, CollisionSet* set){
     synchronized{
         // Get the formatted string
-        string print = format("processed: %d  duplicates: %d   %s", set.member, set.collisions.length, baseName(filepath));
+        string print = format("processed: %d  duplicates: %d   %s", set.length, set.collisions.length, baseName(filepath));
 
         // Print the string
         write(print);
@@ -232,6 +281,7 @@ void progress(string filepath, CollisionSet* set){
     }
 }
 
+/** Function to wipe the verbose output clean */
 void cleanProgress(){
     write("\r");
     for(int i = 0; i < prevLen; i++) write(" ");
@@ -240,10 +290,17 @@ void cleanProgress(){
     prevLen = 0;
 }
 
+/** Reports program usage information without message
+ *  @param program_name the name of program_name
+ */
 void usage(string program_name){
     usage(program_name, "");
 }
 
+/** Reports program usage information with message
+ *  @param program_name the name of program_name
+ *  @param message message to be displayed, if message is empty, then no message will be displayed
+ */
 void usage(string program_name, string message){
     if(message.length != 0) stderr.writeln(message);
     stderr.writef("Usage: %s -q <directory> ...<additonal_directories> -n <excluded_directory> ...<excluded_directories>\n", program_name);
